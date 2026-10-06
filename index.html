@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assistente de Custas – TRF1</title>
+<style>
+  :root { --bg:#f4f6f9; --card:#fff; --ink:#1b2430; --muted:#5b6675; --brand:#0b3d73; --bot:#e8eef6; --me:#0b3d73; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#10151c; --card:#18202a; --ink:#e6ebf2; --muted:#9aa6b6; --brand:#5da2e8; --bot:#222d3a; --me:#2a64a3; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui, sans-serif; }
+  main { max-width:720px; margin:0 auto; height:100dvh; display:flex; flex-direction:column; padding:0 16px; }
+  header { padding:14px 0 8px; }
+  h1 { font-size:1.1rem; margin:0; color:var(--brand); }
+  header p { margin:2px 0 0; font-size:.8rem; color:var(--muted); }
+  #log { flex:1; overflow-y:auto; padding:8px 0; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:88%; padding:10px 12px; border-radius:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .bot { background:var(--bot); align-self:flex-start; }
+  .me { background:var(--me); color:#fff; align-self:flex-end; }
+  #acoes { display:flex; flex-wrap:wrap; gap:8px; padding:8px 0; }
+  button { font:inherit; border:1px solid var(--brand); color:var(--brand); background:var(--card); border-radius:999px; padding:8px 14px; cursor:pointer; }
+  button:hover { background:var(--brand); color:#fff; }
+  form { display:flex; gap:8px; padding:8px 0 16px; }
+  input { flex:1; font:inherit; padding:10px 12px; border-radius:10px; border:1px solid var(--muted); background:var(--card); color:var(--ink); min-width:0; }
+  form button { background:var(--brand); color:#fff; border-radius:10px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Assistente de Custas – Justiça Federal da 1ª Região</h1>
+    <p>Baseado na Portaria Presi 181/2026. Versão de teste.</p>
+  </header>
+  <div id="log" aria-live="polite"></div>
+  <div id="acoes"></div>
+  <form id="form" autocomplete="off">
+    <input id="entrada" placeholder="Digite aqui…" aria-label="Mensagem">
+    <button type="submit">Enviar</button>
+  </form>
+</main>
+
+<script>
+// Chave pública (anon): pode ficar no front-end. Nenhum segredo aqui.
+const SUPABASE_URL = "https://ylykjyhdbmzhylipjfhj.supabase.co";
+const ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlseWtqeWhkYm16aHlsaXBqZmhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyODkwNTAsImV4cCI6MjEwNjg2NTA1MH0.ohKDNX9PkDSHC4trbPS0qVBzWh4GcZBAHvFdqio8h_E";
+const URL_FUNCAO = SUPABASE_URL + "/functions/v1/custas-chat";
+
+const UFS = ["AC","AP","AM","BA","DF","GO","MA","MT","PA","PI","RO","RR","TO"];
+const UFS_PORTE = UFS.filter(u => u !== "DF");
+
+const log = document.getElementById("log");
+const acoes = document.getElementById("acoes");
+const form = document.getElementById("form");
+const entrada = document.getElementById("entrada");
+
+let fluxo = null;      // função que recebe o texto digitado, ou null
+let dados = {};
+
+function msg(texto, quem) {
+  const d = document.createElement("div");
+  d.className = "msg " + quem;
+  d.textContent = texto;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+const bot = t => msg(t, "bot");
+
+function botoes(lista) {
+  acoes.replaceChildren();
+  for (const [rotulo, fn] of lista) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = rotulo;
+    b.onclick = () => { msg(rotulo, "me"); acoes.replaceChildren(); fn(); };
+    acoes.appendChild(b);
+  }
+}
+
+async function chamar(pedido) {
+  bot("Consultando…");
+  try {
+    const r = await fetch(URL_FUNCAO, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + ANON_KEY, apikey: ANON_KEY },
+      body: JSON.stringify(pedido),
+    });
+    const j = await r.json();
+    log.lastChild.remove();
+    bot(j.texto || j.erro || "Sem resposta.");
+  } catch {
+    log.lastChild.remove();
+    bot("Não consegui falar com o servidor. Tente novamente.");
+  }
+  menu();
+}
+
+function menu() {
+  fluxo = null; dados = {};
+  botoes([
+    ["Calcular custas", custas],
+    ["Porte de remessa e retorno", porte],
+    ["Agravo de instrumento", agravo],
+    ["Tirar uma dúvida", duvida],
+    ["Falar com um servidor", () => chamar({ tipo: "contato" })],
+  ]);
+}
+
+function parseNumero(t) {
+  // aceita 1.234,56 ou 1234.56 ou 1234,56
+  let s = t.replace(/[R$\s]/g, "");
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function escolherUF(lista, aoEscolher, pergunta) {
+  bot(pergunta);
+  botoes(lista.map(u => [u, () => aoEscolher(u)]));
+}
+
+// --- Calcular custas ---
+function custas() {
+  bot("Qual a natureza da ação?");
+  botoes([
+    ["Cível em geral", () => fase("civel")],
+    ["Cautelar / jurisdição voluntária", () => fase("cautelar")],
+    ["Valor inestimável (MS, etc.)", () => fase("inestimavel")],
+  ]);
+}
+function fase(natureza) {
+  dados = { tipo: "custas", natureza };
+  bot("O que você vai pagar?");
+  botoes([
+    ["Custas iniciais", () => passoFase("iniciais")],
+    ["Apelação / recurso adesivo", () => passoFase("apelacao")],
+    ["JEF: custas iniciais", () => passoFase("jef_iniciais")],
+    ["JEF: recurso (Turma Recursal)", () => passoFase("jef_recurso")],
+  ]);
+}
+function passoFase(f) {
+  dados.fase = f;
+  if (f === "jef_iniciais") { dados.unidade = "DF"; dados.valorCausa = 0; return chamar(dados); }
+  escolherUF(UFS, u => { dados.unidade = u; pedirValor(); }, "Em qual Seção Judiciária o processo tramita (ou tramitou em 1º grau)?");
+}
+function pedirValor() {
+  if (dados.natureza === "inestimavel") { dados.valorCausa = 0; return chamar(dados); }
+  const atual = dados.fase === "apelacao" || dados.fase === "jef_recurso";
+  bot(atual
+    ? "Informe o valor da causa ATUALIZADO monetariamente (ex.: 12500,50). A portaria não define o índice; confira no sistema oficial do TRF1."
+    : "Informe o valor da causa (ex.: 12500,50).");
+  fluxo = t => {
+    const n = parseNumero(t);
+    if (isNaN(n) || n < 0) return bot("Não entendi o valor. Digite apenas números, por exemplo 12500,50.");
+    dados.valorCausa = n; fluxo = null; chamar(dados);
+  };
+}
+
+// --- Porte ---
+function porte() {
+  dados = { tipo: "porte" };
+  escolherUF(UFS_PORTE, u => {
+    dados.uf = u;
+    bot("Quantas folhas tem o processo físico?");
+    fluxo = t => {
+      const n = parseInt(t, 10);
+      if (!(n >= 1)) return bot("Digite o número de folhas, por exemplo 350.");
+      dados.folhas = n; fluxo = null; chamar(dados);
+    };
+  }, "Qual a UF de origem do processo? (Para DF o porte não é exigido em autos físicos da SJDF.)");
+}
+
+// --- Agravo ---
+function agravo() {
+  dados = { tipo: "agravo" };
+  bot("Os autos são físicos ou eletrônicos?");
+  botoes([
+    ["Eletrônicos", () => { dados.autosFisicos = false; chamar(dados); }],
+    ["Físicos", () => {
+      dados.autosFisicos = true;
+      escolherUF(UFS_PORTE, u => {
+        dados.uf = u;
+        bot("Quantas folhas?");
+        fluxo = t => {
+          const n = parseInt(t, 10);
+          if (!(n >= 1)) return bot("Digite o número de folhas.");
+          dados.folhas = n; fluxo = null; chamar(dados);
+        };
+      }, "UF de origem do processo?");
+    }],
+  ]);
+}
+
+// --- Dúvida em texto livre ---
+function duvida() {
+  bot("Digite sua dúvida sobre custas (respondo com base na Portaria Presi 181/2026).");
+  fluxo = t => { fluxo = null; chamar({ tipo: "pergunta", texto: t }); };
+}
+
+form.addEventListener("submit", e => {
+  e.preventDefault();
+  const t = entrada.value.trim();
+  if (!t) return;
+  entrada.value = "";
+  msg(t, "me");
+  if (fluxo) fluxo(t); else chamar({ tipo: "pergunta", texto: t });
+});
+
+bot("Olá! Sou o assistente de custas da Justiça Federal da 1ª Região. Posso calcular custas e porte, indicar os dados da GRU e tirar dúvidas com base na Portaria Presi 181/2026. Como posso ajudar?");
+menu();
+</script>
+</body>
+</html>
